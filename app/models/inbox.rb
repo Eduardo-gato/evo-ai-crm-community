@@ -171,8 +171,12 @@ class Inbox < ApplicationRecord
     when 'Channel::Line'
       "#{host}/webhooks/line/#{channel.line_channel_id}"
     when 'Channel::Whatsapp'
+      if channel.is_a?(Channel::Whatsapp) && channel.provider == 'waha'
+        # WAHA webhooks are configured on the session (HMAC + session routing),
+        # not on the phone number, which may be blank until the session pairs.
+        "#{host}/webhooks/whatsapp/waha"
       # Use global webhook if global verify token is configured
-      if GlobalConfig.get_value('WP_VERIFY_TOKEN').present?
+      elsif GlobalConfig.get_value('WP_VERIFY_TOKEN').present?
         "#{host}/webhooks/whatsapp"
       else
         # Fallback to phone-specific webhook

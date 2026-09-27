@@ -349,6 +349,7 @@ Rails.application.routes.draw do
           # WhatsApp webhooks
           get 'whatsapp', to: 'webhooks/whatsapp#verify'
           post 'whatsapp', to: 'webhooks/whatsapp#process_payload'
+          post 'whatsapp/waha', to: '/webhooks/whatsapp#process_waha_payload'
           get 'whatsapp/:phone_number', to: 'webhooks/whatsapp#verify'
           post 'whatsapp/:phone_number', to: 'webhooks/whatsapp#process_payload'
           post 'whatsapp/evolution', to: 'webhooks/whatsapp#process_payload'
@@ -479,6 +480,19 @@ Rails.application.routes.draw do
         post 'profile/:id/status', to: 'evolution_go/profile#update_status', as: :profile_update_status
         post 'profile/:id/picture', to: 'evolution_go/profile#update_picture_by_instance', as: :profile_update_picture_by_instance
         delete 'profile/:id/picture', to: 'evolution_go/profile#remove_picture', as: :profile_remove_picture
+      end
+
+      scope path: 'waha', as: 'waha' do
+        resource :authorization, only: [:create], controller: 'waha/authorizations' do
+          collection do
+            post :connect
+            get :fetch
+            post :logout
+            delete :delete_session
+          end
+        end
+        resources :qrcodes, only: [:show, :create], controller: 'waha/qrcodes'
+        put 'settings', to: 'waha/settings#update'
       end
 
       scope path: 'zapi', as: 'zapi' do
@@ -751,6 +765,7 @@ Rails.application.routes.draw do
   post 'webhooks/sendgrid', to: 'webhooks/sendgrid#create'
   get 'webhooks/whatsapp', to: 'webhooks/whatsapp#verify'
   post 'webhooks/whatsapp', to: 'webhooks/whatsapp#process_payload'
+  post 'webhooks/whatsapp/waha', to: 'webhooks/whatsapp#process_waha_payload'
   get 'webhooks/whatsapp/:phone_number', to: 'webhooks/whatsapp#verify'
   post 'webhooks/whatsapp/:phone_number', to: 'webhooks/whatsapp#process_payload'
   get 'webhooks/instagram', to: 'webhooks/instagram#verify'

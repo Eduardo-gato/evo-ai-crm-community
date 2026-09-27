@@ -27,6 +27,7 @@ class Api::V1::GlobalConfigController < Api::BaseController
       hasInstagramConfig: IntegrationRequirements.configured?('instagram'),
       hasEvolutionConfig: IntegrationRequirements.configured?('evolution'),
       hasEvolutionGoConfig: IntegrationRequirements.configured?('evolution_go'),
+      hasWahaConfig: IntegrationRequirements.configured?('waha'),
       hasEvolutionHubConfig: IntegrationRequirements.configured?('evolution_hub'),
       evolutionHubEnabled: evolution_hub_active?,
       hubAllowExistingChannels: hub_allow_existing_channels?,

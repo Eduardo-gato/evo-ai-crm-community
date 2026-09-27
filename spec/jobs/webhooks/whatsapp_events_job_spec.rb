@@ -8,6 +8,26 @@ require 'rails_helper'
 RSpec.describe Webhooks::WhatsappEventsJob, type: :job do
   let(:waba_id) { "waba-#{SecureRandom.hex(4)}" }
 
+  describe 'WAHA session routing' do
+    it 'resolves a channel by its WAHA session without matching Evolution providers' do
+      waha_channel = Channel::Whatsapp.new(
+        provider: 'waha',
+        phone_number: "+1555#{SecureRandom.hex(3)}",
+        provider_config: { 'session' => "support-#{SecureRandom.hex(3)}" }
+      )
+      waha_channel.save!(validate: false)
+      Inbox.create!(channel: waha_channel, name: "WAHA #{SecureRandom.hex(3)}")
+
+      resolved = described_class.new.send(:find_channel, {
+        session: waha_channel.provider_config['session'],
+        event: 'session.status'
+      }.with_indifferent_access)
+
+      expect(resolved).to eq(waha_channel)
+      expect(resolved.provider).to eq('waha')
+    end
+  end
+
   let(:channel) do
     ch = Channel::Whatsapp.new(
       provider: 'whatsapp_cloud',

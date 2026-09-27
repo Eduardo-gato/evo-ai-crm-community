@@ -15,7 +15,8 @@ module ScheduledActionSerializer
       status: scheduled_action.status,
       scheduled_for: scheduled_action.scheduled_for&.iso8601,
       executed_at: scheduled_action.executed_at&.iso8601,
-      payload: scheduled_action.payload || {},
+      payload: (scheduled_action.payload || {}).except('attachments'),
+      attachments: serialize_attachments(scheduled_action),
       template_id: scheduled_action.template_id,
       created_by: scheduled_action.created_by,
       retry_count: scheduled_action.retry_count,
@@ -41,5 +42,16 @@ module ScheduledActionSerializer
     return [] unless scheduled_actions
 
     scheduled_actions.map { |action| serialize(action, **options) }
+  end
+
+  def serialize_attachments(scheduled_action)
+    Array(scheduled_action.payload&.dig('attachments')).filter_map do |entry|
+      next unless entry.is_a?(Hash)
+
+      {
+        file_type: entry['file_type'],
+        file_name: entry['name']
+      }
+    end
   end
 end

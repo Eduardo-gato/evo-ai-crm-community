@@ -60,7 +60,12 @@ module ScheduledActions
 
     # Unified send_message handler that supports: whatsapp, sms, email, telegram
     def execute_send_message
-      return { success: false, error: 'Contact not found' } unless scheduled_action.contact
+      return { success: false, error: 'Contact not found' } unless contact
+
+      # The composer schedules into an existing conversation: use it so the
+      # message goes out through the same inbox/provider and the correct
+      # contact_inbox source_id (essential for WAHA/Evolution JIDs).
+      return execute_send_message_to_conversation if scheduled_action.conversation
 
       channel = scheduled_action.payload['channel']
 
@@ -81,13 +86,19 @@ module ScheduledActions
       { success: false, error: e.message }
     end
 
+    # The action may target only a conversation (created from the chat composer)
+    # with no contact_id stored; resolve it from the conversation.
+    def contact
+      @contact ||= scheduled_action.contact || scheduled_action.conversation&.contact
+    end
+
     # Legacy behavior: send to existing conversation
     def execute_send_message_to_conversation
       conversation = scheduled_action.conversation
 
       unless conversation
-        if scheduled_action.contact
-          conversation = scheduled_action.contact.conversations.where(status: :open).order(created_at: :desc).first
+        if contact
+          conversation = contact.conversations.where(status: :open).order(created_at: :desc).first
         end
       end
 
@@ -102,7 +113,9 @@ module ScheduledActions
         sender: scheduled_action.creator
       }
 
-      message = conversation.messages.create!(message_params)
+      message = conversation.messages.build(message_params)
+      attach_scheduled_files(message)
+      message.save!
       { success: true, data: { message_id: message.id } }
     end
 
@@ -130,15 +143,40 @@ module ScheduledActions
       return conversation if conversation.is_a?(Hash) && conversation[:success] == false
 
       # Create message
-      conversation.messages.create!(
+      message = conversation.messages.build(
         content: message,
         message_type: :outgoing,
         sender_id: scheduled_action.created_by,
         inbox_id: inbox.id,
         conversation_id: conversation.id
       )
+      attach_scheduled_files(message)
+      message.save!
 
       { success: true, data: { message: message, conversation_id: conversation.id } }
+    end
+
+    # Copy the files stored on the scheduled action onto the outgoing message so
+    # the provider (WAHA/Evolution/etc.) sends them with the text/caption. Files
+    # are stored as signed_ids on the payload (see the controller).
+    def attach_scheduled_files(message)
+      Array(scheduled_action.payload['attachments']).each do |entry|
+        signed_id = entry.is_a?(Hash) ? entry['signed_id'] : entry
+        next if signed_id.blank?
+
+        blob = ActiveStorage::Blob.find_signed(signed_id)
+        next unless blob
+
+        file_type = entry.is_a?(Hash) ? entry['file_type'] : nil
+        name = entry.is_a?(Hash) ? entry['name'] : nil
+        message.attachments.build(
+          file: blob,
+          file_type: file_type.presence || 'file',
+          fallback_title: name.presence,
+          extension: name.present? ? File.extname(name).delete_prefix('.').presence : nil,
+          meta: nil
+        )
+      end
     end
 
     # Get channel-specific configuration
@@ -173,22 +211,32 @@ module ScheduledActions
       end
     end
 
-    # Generate WhatsApp source_id from phone number
+    # Generate WhatsApp source_id from the existing contact_inbox when present
+    # (WAHA/Evolution use chat JIDs), falling back to the phone number.
     def whatsapp_source_id
-      phone = scheduled_action.contact.phone_number
+      inbox = whatsapp_inbox
+      if inbox && contact
+        existing = contact.contact_inboxes.find_by(inbox_id: inbox.id)
+        return existing.source_id if existing&.source_id.present?
+      end
+
+      phone = contact&.phone_number
       return nil if phone.blank?
 
       phone.delete('+').to_s
     end
 
     def whatsapp_inbox
+      conversation_inbox = scheduled_action.conversation&.inbox
+      return conversation_inbox if conversation_inbox&.channel_type.in?(%w[Channel::Whatsapp Channel::WhatsappCloud])
+
       Inbox.find_by(channel_type: 'Channel::Whatsapp') ||
         Inbox.find_by(channel_type: 'Channel::WhatsappCloud')
     end
 
     # Generate SMS source_id from phone number
     def sms_source_id
-      phone = scheduled_action.contact.phone_number
+      phone = contact&.phone_number
       return nil if phone.blank?
 
       phone
@@ -201,7 +249,7 @@ module ScheduledActions
       telegram_inbox = Inbox.where(channel_type: 'Channel::Telegram').first
       return nil if telegram_inbox.blank?
 
-      existing = scheduled_action.contact.contact_inboxes.find_by(inbox_id: telegram_inbox.id)
+      existing = contact&.contact_inboxes&.find_by(inbox_id: telegram_inbox.id)
       return existing.source_id if existing.present?
 
       # Generate new UUID for new contact-inbox pair
@@ -218,7 +266,7 @@ module ScheduledActions
       unless contact_inbox
         contact_inbox = ContactInbox.create!(
           inbox_id: inbox.id,
-          contact_id: scheduled_action.contact_id,
+          contact_id: contact.id,
           source_id: source_id
         )
       end
@@ -230,11 +278,11 @@ module ScheduledActions
 
     # Find or create conversation for a contact in an inbox
     def find_or_create_conversation(inbox, contact_inbox)
-      conversation = inbox.conversations.find_by(contact_id: scheduled_action.contact_id)
+      conversation = inbox.conversations.find_by(contact_id: contact.id)
 
       unless conversation
         conversation = inbox.conversations.create!(
-          contact_id: scheduled_action.contact_id,
+          contact_id: contact.id,
           contact_inbox_id: contact_inbox.id
         )
       end
@@ -246,7 +294,7 @@ module ScheduledActions
 
     # Send Email via send_message with email channel
     def execute_send_message_email
-      return { success: false, error: 'Email address not found' } unless scheduled_action.contact.email
+      return { success: false, error: 'Email address not found' } unless contact&.email
 
       subject = scheduled_action.payload['subject']
       message = scheduled_action.payload['message']
@@ -257,14 +305,14 @@ module ScheduledActions
 
       # Send email using ActionMailer
       ScheduledActionMailer.send_email(
-        to: scheduled_action.contact.email,
+        to: contact.email,
         subject: subject,
         body: message,
         from: from,
-        contact_id: scheduled_action.contact_id
+        contact_id: contact.id
       ).deliver_later
 
-      { success: true, data: { email: scheduled_action.contact.email, subject: subject } }
+      { success: true, data: { email: contact.email, subject: subject } }
     end
 
     def execute_webhook
@@ -293,7 +341,7 @@ module ScheduledActions
     end
 
     def execute_create_task
-      return { success: false, error: 'Contact not found' } unless scheduled_action.contact
+      return { success: false, error: 'Contact not found' } unless contact
 
       title = scheduled_action.payload['title']
       return { success: false, error: 'Task title not provided' } if title.blank?
@@ -304,7 +352,7 @@ module ScheduledActions
 
       # Create task
       task_data = {
-        contact_id: scheduled_action.contact_id,
+        contact_id: contact.id,
         title: title,
         description: description,
         due_date: due_date,

@@ -5,7 +5,10 @@ class Webhooks::WhatsappEventsJob < ApplicationJob
     Rails.logger.info "WhatsApp webhook processing started: #{params.inspect}"
 
     channel = find_channel(params)
-    if channel_is_inactive?(channel)
+    return if channel&.provider == 'waha' && duplicate_waha_event?(params)
+
+    waha_session_event = channel&.provider == 'waha' && params[:event].to_s == 'session.status'
+    if channel_is_inactive?(channel) && !waha_session_event
       # Fix B (EVO-1967): reconciliacao ativa. Se chega uma mensagem real e a Evolution
       # reporta a instancia como 'open', a flag de reauthorization esta presa indevidamente
       # (resto de um close transitorio) -> destrava (reauthorized!) e segue processando.
@@ -420,6 +423,8 @@ class Webhooks::WhatsappEventsJob < ApplicationJob
       Whatsapp::IncomingMessageEvolutionService.new(inbox: channel.inbox, params: params).perform
     when 'evolution_go'
       Whatsapp::IncomingMessageEvolutionGoService.new(inbox: channel.inbox, params: params).perform
+    when 'waha'
+      Whatsapp::IncomingMessageWahaService.new(inbox: channel.inbox, params: params).perform
     when 'notificame'
       Whatsapp::IncomingMessageNotificameService.new(inbox: channel.inbox, params: params).perform
     when 'zapi'
@@ -433,13 +438,37 @@ class Webhooks::WhatsappEventsJob < ApplicationJob
     # Log detailed params for debugging
     Rails.logger.info "WhatsApp webhook channel search started with params: #{params.slice(:event, :instance, :phone_number, :server_url, :object)}"
 
-    channel = try_find_channel_from_business_payload(params) ||
+    channel = find_channel_by_waha_session(params[:session]) ||
+              try_find_channel_from_business_payload(params) ||
               try_find_channel_by_phone_number_id(params) ||
               try_find_channel_by_phone_number(params) ||
               try_find_channel_by_waba_id(params)
 
     log_channel_search_result(channel, params)
     channel
+  end
+
+  def find_channel_by_waha_session(session_name)
+    return nil if session_name.blank?
+
+    Channel::Whatsapp.joins(:inbox)
+                     .where(provider: 'waha')
+                     .where("provider_config ->> 'session' = ? OR provider_config ->> 'session_name' = ?", session_name.to_s, session_name.to_s)
+                     .first
+  end
+
+  def duplicate_waha_event?(params)
+    event_id = params[:id].presence
+    return false if event_id.blank?
+
+    key = "waha:event:#{event_id}"
+    return true if Redis::Alfred.get(key).present?
+
+    Redis::Alfred.setex(key, '1', 1.day)
+    false
+  rescue StandardError => e
+    Rails.logger.warn "WAHA event deduplication unavailable: #{e.class} - #{e.message}"
+    false
   end
 
   # WABA-scoped events (e.g. message_template_status_update) carry only the WABA

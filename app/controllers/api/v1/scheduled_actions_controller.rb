@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 class Api::V1::ScheduledActionsController < Api::V1::BaseController
+  include FileTypeHelper
+
   before_action :set_scheduled_action, only: [:show, :update, :destroy]
   before_action :check_authorization, only: [:update, :destroy]
   before_action :authorize_create, only: [:create]
@@ -23,7 +25,8 @@ class Api::V1::ScheduledActionsController < Api::V1::BaseController
   end
 
   def create
-    @scheduled_action = ScheduledAction.new(scheduled_action_params)
+    @scheduled_action = ScheduledAction.new(scheduled_action_params.except(:attachments))
+    resolve_missing_contact!
 
     # Set created_by - use current_user if available, otherwise use a system user for service token auth
     if current_user.present?
@@ -45,6 +48,7 @@ class Api::V1::ScheduledActionsController < Api::V1::BaseController
     end
 
     if @scheduled_action.save
+      attach_uploaded_files
       success_response(
         data: ScheduledActionSerializer.serialize(@scheduled_action),
         message: 'Scheduled action created successfully',
@@ -131,6 +135,42 @@ class Api::V1::ScheduledActionsController < Api::V1::BaseController
     @scheduled_action = ScheduledAction.find(params[:id])
   end
 
+  # The chat composer schedules with only a conversation_id. Persist the contact
+  # so the action carries every target it needs (and the UI can show it).
+  def resolve_missing_contact!
+    return if @scheduled_action.contact_id.present? || @scheduled_action.conversation_id.blank?
+
+    conversation = Conversation.find_by(id: @scheduled_action.conversation_id)
+    @scheduled_action.contact_id = conversation.contact_id if conversation
+  end
+
+  # Files uploaded with the scheduled message. `attachments.attachable_id` is a
+  # UUID column and ScheduledAction uses a bigint id, so the custom Attachment
+  # association can't reference it. Store the blobs as signed ids on the payload
+  # instead; the executor hands them to the outgoing message.
+  def attach_uploaded_files
+    files = Array(params.dig(:scheduled_action, :attachments)).compact
+    return if files.empty?
+
+    stored = files.filter_map do |file|
+      next unless file.respond_to?(:tempfile) && file.respond_to?(:original_filename)
+
+      blob = ActiveStorage::Blob.create_and_upload!(
+        io: file.tempfile,
+        filename: file.original_filename,
+        content_type: file.content_type
+      )
+      {
+        'signed_id' => blob.signed_id,
+        'file_type' => file_type(file.content_type).to_s,
+        'name' => file.original_filename
+      }
+    end
+    return if stored.empty?
+
+    @scheduled_action.update!(payload: (@scheduled_action.payload || {}).merge('attachments' => stored))
+  end
+
   def check_authorization
     authorize @scheduled_action
   end
@@ -190,7 +230,8 @@ class Api::V1::ScheduledActionsController < Api::V1::BaseController
       :max_retries,
       :recurrence_type,
       payload: {},
-      recurrence_config: {}
+      recurrence_config: {},
+      attachments: []
     )
   end
 

@@ -57,7 +57,16 @@ module InboxSerializer
 
       # WhatsApp-specific data required by channel settings screens
       if inbox.whatsapp?
-        result['provider_config'] = inbox.channel.try(:provider_config)
+        provider_config = (inbox.channel.try(:provider_config) || {}).to_h.deep_dup
+        if inbox.channel.provider == 'waha'
+          provider_config.delete('api_key')
+          provider_config.delete('webhook_hmac_key')
+          provider_config['api_key_configured'] = inbox.channel.provider_config['api_key'].present? ||
+                                                  GlobalConfigService.load('WAHA_API_KEY', '').to_s.present?
+          provider_config['webhook_hmac_configured'] = inbox.channel.provider_config['webhook_hmac_key'].present? ||
+                                                       GlobalConfigService.load('WAHA_WEBHOOK_HMAC_KEY', '').to_s.present?
+        end
+        result['provider_config'] = provider_config
         result['provider_connection'] = inbox.channel.try(:provider_connection_data)
       end
 

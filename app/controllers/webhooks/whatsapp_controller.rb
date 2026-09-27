@@ -1,3 +1,5 @@
+require 'openssl'
+
 class Webhooks::WhatsappController < ActionController::API
   include MetaTokenVerifyConcern
 
@@ -30,6 +32,23 @@ class Webhooks::WhatsappController < ActionController::API
     # Process Evolution Go webhook
     Webhooks::WhatsappEventsJob.perform_later(params.to_unsafe_hash.merge(evolution_go: true))
     head :ok
+  end
+
+  def process_waha_payload
+    raw_payload = request.raw_post
+    payload = JSON.parse(raw_payload)
+    session_name = payload['session'].to_s
+    channel = Channel::Whatsapp.joins(:inbox)
+                               .where(provider: 'waha')
+                               .where("provider_config ->> 'session' = ? OR provider_config ->> 'session_name' = ?", session_name, session_name)
+                               .first
+
+    return head :unauthorized if channel.blank? || !valid_waha_hmac?(raw_payload, channel)
+
+    Webhooks::WhatsappEventsJob.perform_later(payload.deep_symbolize_keys.merge(waha: true))
+    head :ok
+  rescue JSON::ParserError
+    render json: { error: 'Invalid WAHA JSON payload' }, status: :bad_request
   end
 
   private
@@ -129,5 +148,19 @@ class Webhooks::WhatsappController < ActionController::API
   def evolution_go_payload?
     # Evolution Go webhooks have instanceId and instanceToken at root level
     params[:instanceId].present? && params[:instanceToken].present? && params[:event].present?
+  end
+
+  def valid_waha_hmac?(raw_payload, channel)
+    secret = channel.provider_config['webhook_hmac_key'].presence ||
+             GlobalConfigService.load('WAHA_WEBHOOK_HMAC_KEY', '').to_s.strip
+    signature = request.headers['X-Webhook-Hmac'].to_s
+    return false if secret.blank? || signature.blank?
+
+    expected = OpenSSL::HMAC.hexdigest('SHA512', secret, raw_payload)
+    return false unless signature.length == expected.length
+
+    ActiveSupport::SecurityUtils.secure_compare(expected, signature)
+  rescue ArgumentError
+    false
   end
 end

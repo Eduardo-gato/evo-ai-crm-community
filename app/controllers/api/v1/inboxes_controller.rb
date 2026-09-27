@@ -118,6 +118,8 @@ module Api
             Rails.logger.info "[InboxesController] Inbox saved - name: #{@inbox.name.inspect}, display_name: #{@inbox.display_name.inspect}"
           end
 
+          add_creator_as_inbox_member(@inbox)
+
           success_response(
             data: InboxSerializer.serialize(@inbox),
             message: 'Inbox created successfully',
@@ -460,6 +462,18 @@ module Api
         end
 
         private
+
+        # The inbox creator must be a member; otherwise the RBAC-scoped
+        # conversation list hides the channel's conversations from them even
+        # though the webhook is writing messages to it. Best-effort: a failure
+        # here must never roll back an already-created inbox.
+        def add_creator_as_inbox_member(inbox)
+          return unless Current.user.respond_to?(:id) && Current.user.id.present?
+
+          InboxMember.find_or_create_by!(inbox: inbox, user_id: Current.user.id)
+        rescue StandardError => e
+          Rails.logger.warn "[InboxesController] could not add creator to inbox members: #{e.message}"
+        end
 
         def hub_managed_channel?(channel)
           channel.respond_to?(:evolution_hub_channel_id) && channel.evolution_hub_channel_id.present?

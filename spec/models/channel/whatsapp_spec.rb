@@ -189,4 +189,33 @@ RSpec.describe Channel::Whatsapp, type: :model do
       expect(channel).to be_valid
     end
   end
+
+  describe 'phone number requirement' do
+    it 'allows a WAHA channel without a phone number (discovered after pairing)' do
+      channel = described_class.new(provider: 'waha', provider_config: {
+        'api_url' => 'http://waha:3000', 'api_key' => 'k', 'session' => 'default'
+      })
+      allow(channel).to receive(:validate_provider_config)
+
+      expect(channel).to be_valid
+    end
+
+    it 'still requires a phone number for other providers' do
+      channel = described_class.new(provider: 'evolution')
+      allow(channel).to receive(:validate_provider_config)
+
+      channel.valid?
+
+      expect(channel.errors[:phone_number]).to be_present
+    end
+
+    it 'allows multiple WAHA channels with no phone number (nil skips uniqueness)' do
+      allow_any_instance_of(described_class).to receive(:validate_provider_config)
+
+      described_class.create!(provider: 'waha', provider_config: { 'session' => 'default' })
+      second = described_class.new(provider: 'waha', provider_config: { 'session' => 'default2' })
+
+      expect(second).to be_valid
+    end
+  end
 end

@@ -3,7 +3,7 @@
 # Table name: channel_whatsapp
 #
 #  id                  :uuid             not null, primary key
-#  phone_number        :string           not null
+#  phone_number        :string
 #  provider            :string           default("default")
 #  provider_config     :jsonb
 #  provider_connection :jsonb
@@ -26,7 +26,7 @@ class Channel::Whatsapp < ApplicationRecord
   EDITABLE_ATTRS = [:phone_number, :provider, { provider_config: {} }].freeze
 
   # default at the moment is 360dialog lets change later.
-  PROVIDERS = %w[default whatsapp_cloud evolution evolution_go notificame zapi].freeze
+  PROVIDERS = %w[default whatsapp_cloud evolution evolution_go waha notificame zapi].freeze
 
   # Snapshot values that mean the channel is down; mirrors the disconnected
   # half of Channels::ConnectionStateResolver::CONNECTION_MAP.
@@ -45,7 +45,11 @@ class Channel::Whatsapp < ApplicationRecord
   before_validation :merge_evolution_go_global_config, if: -> { provider == 'evolution_go' }
 
   validates :provider, inclusion: { in: PROVIDERS }
-  validates :phone_number, presence: true, uniqueness: true
+  # WAHA channels are created before pairing, so the number is unknown until the
+  # session reports WORKING and we read it from `/me`. Every other provider
+  # still requires it, and uniqueness is kept for all (nil skips the check).
+  validates :phone_number, presence: true, unless: -> { provider == 'waha' }
+  validates :phone_number, uniqueness: true, allow_nil: true
   validate :validate_provider_config
 
   has_one :inbox, as: :channel, dependent: :destroy
@@ -60,7 +64,7 @@ class Channel::Whatsapp < ApplicationRecord
   after_create :sync_templates
   before_destroy :unsubscribe
 
-  before_destroy :disconnect_channel_provider, if: -> { provider.in?(%w[evolution evolution_go]) }
+  before_destroy :disconnect_channel_provider, if: -> { provider.in?(%w[evolution evolution_go waha]) }
 
   # Notificame specific callbacks
   after_create_commit -> { Notificame::SubscribeWebhookJob.perform_later(id) },
@@ -88,6 +92,8 @@ class Channel::Whatsapp < ApplicationRecord
       Whatsapp::Providers::EvolutionService.new(whatsapp_channel: self)
     when 'evolution_go'
       Whatsapp::Providers::EvolutionGoService.new(whatsapp_channel: self)
+    when 'waha'
+      Whatsapp::Providers::WahaService.new(whatsapp_channel: self)
     when 'notificame'
       Whatsapp::Providers::NotificameService.new(whatsapp_channel: self)
     when 'zapi'

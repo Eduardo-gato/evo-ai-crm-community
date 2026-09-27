@@ -190,7 +190,7 @@ class Whatsapp::SendOnWhatsappService < Base::SendOnChannelService
         return contact_inbox.source_id
       end
     # For Evolution Go provider, identifier prioritizes over phone_number
-    elsif channel.provider == 'evolution_go'
+    elsif channel.provider.in?(%w[evolution_go waha])
       # Use identifier ONLY when it looks like a valid number/JID (Evolution Go SenderAlt).
       # A non-numeric identifier (e.g. imported lead label "samambaia-090") is an external ID,
       # never a WhatsApp destination — fall back to phone_number / source_id.
@@ -244,12 +244,16 @@ class Whatsapp::SendOnWhatsappService < Base::SendOnChannelService
   end
 
   def route_to_group?
-    channel.provider.in?(%w[evolution evolution_go]) && group_jid_from_conversation.present?
+    channel.provider.in?(%w[evolution evolution_go waha]) && group_jid_from_conversation.present?
   end
 
   def group_jid_from_conversation
     attrs = message.conversation.additional_attributes || {}
-    key = channel.provider == 'evolution_go' ? 'evolution_go_chat_id' : 'evolution_chat_id'
+    key = case channel.provider
+          when 'evolution_go' then 'evolution_go_chat_id'
+          when 'waha' then 'waha_chat_id'
+          else 'evolution_chat_id'
+          end
     candidate = attrs[key]
     candidate if candidate.is_a?(String) && candidate.end_with?('@g.us')
   end
