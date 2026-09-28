@@ -219,4 +219,37 @@ RSpec.describe Whatsapp::IncomingMessageWahaService do
       expect(service.send(:contact_name, '5511999999999', '+5511999999999')).to eq('+5511999999999')
     end
   end
+
+  describe '#resolved_from (@lid unification)' do
+    let(:params) do
+      { event: 'message.any', payload: { id: 'x', from: '168422931472444@lid', fromMe: false, body: 'oi' } }
+    end
+
+    before do
+      allow(channel).to receive(:provider_config).and_return({ 'session' => 'default' })
+      Rails.cache.clear
+    end
+
+    it 'resolves a @lid to the phone JID via the WAHA LID API' do
+      provider = instance_double(Whatsapp::Providers::WahaService, resolve_lid: '5511999999999')
+      allow(channel).to receive(:provider_service).and_return(provider)
+
+      expect(service.send(:resolved_from)).to eq('5511999999999@c.us')
+    end
+
+    it 'prefers the phone JID present in the raw payload' do
+      allow(service).to receive(:payload).and_return(
+        { from: '168422931472444@lid', _data: { key: { remoteJidAlt: '5511999999999@c.us' } } }
+      )
+
+      expect(service.send(:resolved_from)).to eq('5511999999999@c.us')
+    end
+
+    it 'keeps the @lid when it cannot be resolved' do
+      provider = instance_double(Whatsapp::Providers::WahaService, resolve_lid: nil)
+      allow(channel).to receive(:provider_service).and_return(provider)
+
+      expect(service.send(:resolved_from)).to eq('168422931472444@lid')
+    end
+  end
 end

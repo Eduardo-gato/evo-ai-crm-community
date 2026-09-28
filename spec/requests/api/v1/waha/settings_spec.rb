@@ -63,7 +63,13 @@ RSpec.describe 'Api::V1::Waha::Settings', type: :request do
       end
   end
 
-  before { stub_auth(role_key: 'agent', granted: %w[inboxes.update]) }
+  before do
+    stub_auth(role_key: 'agent', granted: %w[inboxes.update])
+    # Saving the connection re-applies the WAHA webhook; stub the outbound PUT.
+    stub_request(:put, %r{/api/sessions/})
+      .to_return(status: 200, body: { name: 'session' }.to_json,
+                 headers: { 'Content-Type' => 'application/json' })
+  end
 
   it 'updates the connection override and preserves the rest of provider_config' do
     put '/api/v1/waha/settings',

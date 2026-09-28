@@ -24,6 +24,7 @@ class Api::V1::Waha::SettingsController < Api::V1::BaseController
     end
 
     channel.update!(provider_config: config)
+    reapply_webhook(channel)
 
     render json: { success: true, provider_config: sanitized_config(channel) }
   rescue ActiveRecord::RecordInvalid => e
@@ -34,6 +35,25 @@ class Api::V1::Waha::SettingsController < Api::V1::BaseController
   end
 
   private
+
+  # Editing the connection (URL/API key) may point the channel at a server whose
+  # session lost the CRM webhook; (re)apply it best-effort so events keep coming.
+  def reapply_webhook(channel)
+    service = channel.provider_service
+    return unless service.respond_to?(:apply_session_config!)
+
+    config = channel.provider_config.to_h
+    service.apply_session_config!(
+      ignore: {
+        groups: config['ignore_groups'],
+        status: config['ignore_status'],
+        channels: config['ignore_channels'],
+        broadcast: config['ignore_broadcast']
+      }
+    )
+  rescue StandardError => e
+    Rails.logger.warn "WAHA settings: webhook reapply failed: #{e.class} - #{e.message}"
+  end
 
   def find_waha_channel
     identifier = params[:session].presence || params[:session_name].presence || params[:id].presence

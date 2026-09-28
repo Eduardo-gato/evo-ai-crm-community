@@ -57,7 +57,7 @@ RSpec.describe 'Api::V1::Waha::Authorizations', type: :request do
       end
   end
 
-  before { stub_auth(role_key: 'agent', granted: %w[inboxes.create]) }
+  before { stub_auth(role_key: 'agent', granted: %w[inboxes.create inboxes.update]) }
 
   it 'reuses an existing WAHA session by updating it with PUT' do
     stub_request(:post, 'http://waha.test/api/sessions')
@@ -118,6 +118,9 @@ RSpec.describe 'Api::V1::Waha::Authorizations', type: :request do
     stub_request(:get, 'http://waha.test/api/sessions/default')
       .to_return(status: 200, body: { name: 'default', status: 'WORKING' }.to_json,
                  headers: { 'Content-Type' => 'application/json' })
+    stub_request(:put, 'http://waha.test/api/sessions/default')
+      .to_return(status: 200, body: { name: 'default', status: 'WORKING' }.to_json,
+                 headers: { 'Content-Type' => 'application/json' })
 
     post '/api/v1/waha/authorization', params: { authorization: authorization }, headers: headers, as: :json
 
@@ -137,5 +140,30 @@ RSpec.describe 'Api::V1::Waha::Authorizations', type: :request do
 
     expect(response).to have_http_status(:unprocessable_entity)
     expect(JSON.parse(response.body)['error']).to include('403')
+  end
+
+  it 'reapplies the CRM webhook config to an existing session' do
+    target_session = "sync-#{SecureRandom.hex(3)}"
+    ch = Channel::Whatsapp.new(
+      provider: 'waha',
+      phone_number: "+1555#{SecureRandom.hex(3)}",
+      provider_config: {
+        'api_url' => 'http://waha.test',
+        'api_key' => 'secret',
+        'session' => target_session,
+        'webhook_hmac_key' => 'hmac-secret',
+        'ignore_groups' => true
+      }
+    )
+    ch.save!(validate: false)
+    Inbox.create!(channel: ch, name: "WAHA #{SecureRandom.hex(3)}")
+
+    stub_request(:put, "http://waha.test/api/sessions/#{target_session}")
+      .to_return(status: 200, body: { name: target_session }.to_json, headers: { 'Content-Type' => 'application/json' })
+
+    post '/api/v1/waha/authorization/sync_webhook', params: { session: target_session }, headers: headers, as: :json
+
+    expect(response).to have_http_status(:ok)
+    expect(JSON.parse(response.body)['success']).to be(true)
   end
 end

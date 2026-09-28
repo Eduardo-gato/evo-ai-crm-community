@@ -17,6 +17,32 @@ class Whatsapp::Providers::WahaService < Whatsapp::Providers::BaseService
     "https://#{url}"
   end
 
+  # Public URL WAHA should POST events to. Prefers the explicit override, then
+  # BACKEND_URL (must be reachable from the WAHA server, not just the CRM host).
+  def self.webhook_url
+    GlobalConfigService.load('WAHA_WEBHOOK_BASE_URL', '').to_s.strip.presence ||
+      "#{ENV.fetch('BACKEND_URL', '').chomp('/')}/webhooks/whatsapp/waha"
+  end
+
+  # Session config the CRM applies on create/update so WAHA delivers events and
+  # respects the channel's ignore flags.
+  def self.session_config(hmac_key:, ignore: {})
+    {
+      webhooks: [{
+        url: webhook_url,
+        events: %w[message.any message.ack message.revoked message.edited session.status],
+        hmac: { key: hmac_key },
+        retries: { policy: 'exponential', delaySeconds: 2, attempts: 5 }
+      }],
+      ignore: {
+        groups: ignore[:groups] || false,
+        status: ignore[:status] || false,
+        channels: ignore[:channels] || false,
+        broadcast: ignore[:broadcast] || false
+      }
+    }
+  end
+
   def send_message(phone_number, message)
     @message = message
 
@@ -90,6 +116,48 @@ class Whatsapp::Providers::WahaService < Whatsapp::Providers::BaseService
     Rails.logger.warn 'WAHA /me phone conflicts with an existing channel; keeping it in provider_config only'
   rescue StandardError => e
     Rails.logger.warn "WAHA sync_connected_phone failed: #{e.class} - #{e.message}"
+  end
+
+  # Resolves a `@lid` (WhatsApp privacy identifier) to its phone number (digits),
+  # so inbound messages from LIDs can be unified with the phone-based contact.
+  # Returns nil when the mapping is unknown.
+  def resolve_lid(lid)
+    value = lid.to_s.strip
+    return nil if value.blank? || api_url.blank? || api_key.blank? || session_name.blank?
+
+    response = request(:get, "/api/#{encoded_session_name}/lids/#{CGI.escape(value)}")
+    return nil unless response.success?
+
+    parsed = response.parsed_response
+    pn = parsed.is_a?(Hash) ? parsed['pn'] : nil
+    pn.to_s.split('@').first.presence
+  rescue StandardError => e
+    Rails.logger.warn "WAHA resolve_lid failed: #{e.class} - #{e.message}"
+    nil
+  end
+
+  # (Re)applies the session config (webhook + ignore flags) to an existing WAHA
+  # session. Best-effort: returns false instead of raising so callers can keep
+  # going when the API key cannot update the session (e.g. session-scoped key).
+  def apply_session_config!(ignore: {}, hmac_key: nil)
+    return false if api_url.blank? || api_key.blank? || session_name.blank?
+
+    key = hmac_key.presence ||
+          provider_config['webhook_hmac_key'].presence ||
+          GlobalConfigService.load('WAHA_WEBHOOK_HMAC_KEY', '').to_s.strip
+    return false if key.blank?
+
+    body = { name: session_name, config: self.class.session_config(hmac_key: key, ignore: ignore) }
+    response = request(:put, "/api/sessions/#{encoded_session_name}", body: body)
+    unless response.success?
+      Rails.logger.warn "WAHA apply_session_config failed #{response.code}: #{response.body.to_s.truncate(200)}"
+      return false
+    end
+
+    true
+  rescue StandardError => e
+    Rails.logger.warn "WAHA apply_session_config error: #{e.class} - #{e.message}"
+    false
   end
 
   def media_url(media_id)

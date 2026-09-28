@@ -488,6 +488,7 @@ Rails.application.routes.draw do
             post :connect
             get :fetch
             post :logout
+            post :sync_webhook
             delete :delete_session
           end
         end

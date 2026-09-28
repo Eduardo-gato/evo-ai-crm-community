@@ -35,7 +35,7 @@ class Whatsapp::IncomingMessageWahaService < Whatsapp::IncomingMessageBaseServic
   end
 
   def normalize_message
-    from = payload[:from].to_s
+    from = resolved_from
     media = payload[:media].is_a?(Hash) ? payload[:media] : {}
     type = media.present? || payload[:has_media] || payload[:hasMedia] ? media_type(media) : 'text'
     reply_id = payload.dig(:reply_to, :id) || payload.dig(:replyTo, :id)
@@ -75,7 +75,7 @@ class Whatsapp::IncomingMessageWahaService < Whatsapp::IncomingMessageBaseServic
   end
 
   def set_contact
-    source_id = contact_source_id(payload[:from])
+    source_id = contact_source_id(resolved_from)
     return if source_id.blank?
 
     phone_number = source_id.match?(/\A\d{8,15}\z/) ? "+#{source_id}" : nil
@@ -90,7 +90,7 @@ class Whatsapp::IncomingMessageWahaService < Whatsapp::IncomingMessageBaseServic
   end
 
   def conversation_params
-    super.merge(additional_attributes: { waha_chat_id: normalized_jid(payload[:from]) })
+    super.merge(additional_attributes: { waha_chat_id: normalized_jid(resolved_from) })
   end
 
   def process_ack
@@ -195,6 +195,54 @@ class Whatsapp::IncomingMessageWahaService < Whatsapp::IncomingMessageBaseServic
   end
 
   def source_id_for_contact
-    @contact_inbox&.source_id || contact_source_id(payload[:from])
+    @contact_inbox&.source_id || contact_source_id(resolved_from)
+  end
+
+  # WhatsApp delivers some 1:1 senders with a `@lid` (privacy identifier) instead
+  # of the phone JID. Resolve it to the phone (`@c.us`) so the message lands on
+  # the phone-based contact/conversation instead of creating a separate one.
+  def resolved_from
+    @resolved_from ||= begin
+      from = payload[:from].to_s
+      if from.end_with?('@lid')
+        alternative_phone_jid(from) || lid_phone_jid(from) || from
+      else
+        from
+      end
+    end
+  end
+
+  # Some engines include the phone JID alongside the LID in the raw payload.
+  def alternative_phone_jid(_lid)
+    candidates = [
+      payload.dig(:_data, :key, :remoteJidAlt),
+      payload.dig(:_data, :key, :participantAlt),
+      payload[:sender_alt],
+      payload[:senderAlt],
+      payload[:participantAlt]
+    ]
+    candidates.each do |candidate|
+      jid = candidate.to_s
+      next if jid.blank? || jid.end_with?('@lid')
+
+      return jid if jid.end_with?('@c.us', '@s.whatsapp.net')
+    end
+    nil
+  end
+
+  def lid_phone_jid(lid)
+    cache_key = "waha:lid:#{inbox.channel.provider_config['session']}:#{lid}"
+    cached = Rails.cache.read(cache_key)
+    return cached if cached.present?
+
+    service = inbox.channel.provider_service
+    return nil unless service.respond_to?(:resolve_lid)
+
+    phone = service.resolve_lid(lid)
+    return nil if phone.blank?
+
+    jid = "#{phone}@c.us"
+    Rails.cache.write(cache_key, jid, expires_in: 12.hours)
+    jid
   end
 end

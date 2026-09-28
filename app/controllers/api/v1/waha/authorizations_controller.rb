@@ -6,7 +6,8 @@ class Api::V1::Waha::AuthorizationsController < Api::V1::BaseController
     connect: 'inboxes.update',
     fetch: 'inboxes.read',
     logout: 'inboxes.update',
-    delete_session: 'inboxes.delete'
+    delete_session: 'inboxes.delete',
+    sync_webhook: 'inboxes.update'
   })
 
   def create
@@ -34,24 +35,18 @@ class Api::V1::Waha::AuthorizationsController < Api::V1::BaseController
     configured_hmac_key = GlobalConfigService.load('WAHA_WEBHOOK_HMAC_KEY', '').to_s.strip.presence
     webhook_hmac_key = data[:webhook_hmac_key].presence || configured_hmac_key || SecureRandom.hex(32)
     generated_hmac_key = configured_hmac_key.blank? && data[:webhook_hmac_key].blank?
-    webhook_url = GlobalConfigService.load('WAHA_WEBHOOK_BASE_URL', '').to_s.strip.presence ||
-                  "#{ENV.fetch('BACKEND_URL', '').chomp('/')}/webhooks/whatsapp/waha"
+    webhook_url = Whatsapp::Providers::WahaService.webhook_url
     return render json: { error: 'BACKEND_URL or WAHA_WEBHOOK_BASE_URL is required' }, status: :unprocessable_entity if webhook_url.start_with?('/')
 
-    config = {
-      webhooks: [{
-        url: webhook_url,
-        events: %w[message.any message.ack message.revoked message.edited session.status],
-        hmac: { key: webhook_hmac_key },
-        retries: { policy: 'exponential', delaySeconds: 2, attempts: 5 }
-      }],
+    config = Whatsapp::Providers::WahaService.session_config(
+      hmac_key: webhook_hmac_key,
       ignore: {
         groups: ActiveModel::Type::Boolean.new.cast(data[:ignore_groups]),
         status: ActiveModel::Type::Boolean.new.cast(data[:ignore_status]),
         channels: ActiveModel::Type::Boolean.new.cast(data[:ignore_channels]),
         broadcast: ActiveModel::Type::Boolean.new.cast(data[:ignore_broadcast])
       }
-    }
+    )
     body = { name: session_name, config: config }
     body[:engine] = data[:engine].to_s.upcase if data[:engine].present?
 
@@ -67,10 +62,15 @@ class Api::V1::Waha::AuthorizationsController < Api::V1::BaseController
         reused = true
       elsif session_forbidden?(response)
         # A session-scoped API key (scope "Session") cannot create sessions. If
-        # the session already exists on the WAHA side, just reference it.
+        # the session already exists, reference it and try to (re)apply the CRM
+        # webhook config (best effort: the key may not allow PUT either).
         existing = waha_request(:get, api_url, "/api/sessions/#{CGI.escape(session_name)}", api_key: api_key)
         return render_external_error(response) unless existing.success?
 
+        reuse_response = waha_request(:put, api_url, "/api/sessions/#{CGI.escape(session_name)}", api_key: api_key, body: body)
+        unless reuse_response.success?
+          Rails.logger.warn "WAHA reuse: could not apply session config for #{session_name} (#{reuse_response.code})"
+        end
         reused = true
       else
         return render_external_error(response)
@@ -108,6 +108,26 @@ class Api::V1::Waha::AuthorizationsController < Api::V1::BaseController
 
   def logout
     with_session_request(:post, :logout)
+  end
+
+  # Reapplies the CRM webhook (URL + HMAC + events) to an existing WAHA session.
+  # Useful when the session was created outside the CRM or its webhooks were
+  # cleared, so the operator can fix it from the channel settings.
+  def sync_webhook
+    data = session_data
+    channel = data[:channel]
+    return render json: { error: 'WAHA session not found' }, status: :not_found if channel.blank?
+
+    service = channel.provider_service
+    applied = service.respond_to?(:apply_session_config!) &&
+              service.apply_session_config!(ignore: waha_ignore_flags(channel))
+
+    if applied
+      render json: { success: true, message: 'WAHA webhook reapplied' }
+    else
+      render json: { error: 'Não foi possível reaplicar o webhook na WAHA. Verifique a URL, a API key e as permissões.' },
+             status: :unprocessable_entity
+    end
   end
 
   def delete_session
@@ -219,6 +239,16 @@ class Api::V1::Waha::AuthorizationsController < Api::V1::BaseController
 
   def session_forbidden?(response)
     response.code.to_i == 403
+  end
+
+  def waha_ignore_flags(channel)
+    config = channel.provider_config.to_h
+    {
+      groups: config['ignore_groups'],
+      status: config['ignore_status'],
+      channels: config['ignore_channels'],
+      broadcast: config['ignore_broadcast']
+    }
   end
 
   def waha_enabled?
