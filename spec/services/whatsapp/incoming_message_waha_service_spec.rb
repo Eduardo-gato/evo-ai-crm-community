@@ -195,6 +195,10 @@ RSpec.describe Whatsapp::IncomingMessageWahaService do
       expect(service.send(:contact_source_id, '5511999999999@s.whatsapp.net')).to eq('5511999999999')
     end
 
+    it 'strips a device suffix from phone JIDs' do
+      expect(service.send(:contact_source_id, '556291969008:92@s.whatsapp.net')).to eq('556291969008')
+    end
+
     it 'keeps @lid and @g.us JIDs untouched' do
       expect(service.send(:contact_source_id, '100712839131186@lid')).to eq('100712839131186@lid')
       expect(service.send(:contact_source_id, '120363025801848701@g.us')).to eq('120363025801848701@g.us')
@@ -243,6 +247,14 @@ RSpec.describe Whatsapp::IncomingMessageWahaService do
       )
 
       expect(service.send(:resolved_from)).to eq('5511999999999@c.us')
+    end
+
+    it 'resolves the phone JID from SenderAlt, stripping the device suffix' do
+      allow(service).to receive(:payload).and_return(
+        { from: '168422931472444@lid', _data: { Info: { SenderAlt: '556291969008:92@s.whatsapp.net' } } }
+      )
+
+      expect(service.send(:resolved_from)).to eq('556291969008@s.whatsapp.net')
     end
 
     it 'keeps the @lid when it cannot be resolved' do

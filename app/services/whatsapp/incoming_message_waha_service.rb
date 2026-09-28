@@ -155,7 +155,7 @@ class Whatsapp::IncomingMessageWahaService < Whatsapp::IncomingMessageBaseServic
   def contact_source_id(value)
     jid = value.to_s.delete_prefix('+')
     return if broadcast_or_status?(jid)
-    return jid.split('@').first if jid.end_with?('@c.us', '@s.whatsapp.net')
+    return jid.split('@').first.split(':').first if jid.end_with?('@c.us', '@s.whatsapp.net')
 
     jid
   end
@@ -215,6 +215,9 @@ class Whatsapp::IncomingMessageWahaService < Whatsapp::IncomingMessageBaseServic
   # Some engines include the phone JID alongside the LID in the raw payload.
   def alternative_phone_jid(_lid)
     candidates = [
+      payload.dig(:_data, :Info, :SenderAlt),
+      payload.dig(:_data, :Info, :RecipientAlt),
+      payload.dig(:_data, :Info, :senderAlt),
       payload.dig(:_data, :key, :remoteJidAlt),
       payload.dig(:_data, :key, :participantAlt),
       payload[:sender_alt],
@@ -222,12 +225,22 @@ class Whatsapp::IncomingMessageWahaService < Whatsapp::IncomingMessageBaseServic
       payload[:participantAlt]
     ]
     candidates.each do |candidate|
-      jid = candidate.to_s
-      next if jid.blank? || jid.end_with?('@lid')
-
-      return jid if jid.end_with?('@c.us', '@s.whatsapp.net')
+      jid = normalize_phone_jid(candidate)
+      return jid if jid.present?
     end
     nil
+  end
+
+  # `SenderAlt` may arrive with a device suffix (`5562...:92@s.whatsapp.net`);
+  # strip it so the resulting JID matches the phone-based contact/source_id.
+  def normalize_phone_jid(value)
+    jid = value.to_s.strip
+    return nil if jid.blank? || jid.end_with?('@lid')
+
+    jid = jid.sub(/:(\d+)@/, '@')
+    return nil unless jid.end_with?('@c.us', '@s.whatsapp.net')
+
+    jid
   end
 
   def lid_phone_jid(lid)
