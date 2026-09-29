@@ -355,7 +355,12 @@ class Whatsapp::IncomingMessageWahaService < Whatsapp::IncomingMessageBaseServic
   # source_id already exists (the echo of a message sent from the CRM panel).
   def process_outgoing_echo
     source_id = payload[:id].to_s
-    return if source_id.blank? || broadcast_or_status?(peer_chat_id)
+    return if source_id.blank?
+
+    if broadcast_or_status?(peer_chat_id)
+      Rails.logger.info "WAHA outgoing echo: ignoring broadcast/unknown peer chat=#{peer_chat_id.inspect}"
+      return
+    end
 
     existing = inbox.messages.find_by(source_id: source_id)
     if existing
@@ -423,44 +428,79 @@ class Whatsapp::IncomingMessageWahaService < Whatsapp::IncomingMessageBaseServic
     payload[:from_me] == true || payload[:fromMe] == true
   end
 
-  # Peer (contact) chat id reported by WAHA under `_data.Info.Chat`.
+  # Peer (contact) chat id for a `fromMe` message. WAHA exposes it on
+  # `payload.to` (the recipient) and, depending on the engine, on
+  # `_data.Info.Chat` / `_data.Info.Recipient`.
   def peer_chat_id
-    payload.dig(:_data, :Info, :Chat).presence ||
-      payload[:chat_id].presence ||
-      payload[:chatId].presence
+    payload[:chat_id].presence ||
+      payload[:chatId].presence ||
+      payload.dig(:_data, :Info, :Chat).presence ||
+      payload.dig(:_data, :Info, :Recipient).presence ||
+      payload[:to].presence
   end
 
   # Peer (contact) phone for a `fromMe` message: `_data.Info.RecipientAlt`.
+  # Falls back to `payload.to`, which is the peer JID for a 1:1 chat.
   def peer_phone
     value = payload.dig(:_data, :Info, :RecipientAlt).presence ||
+            payload.dig(:_data, :Info, :recipientAlt).presence ||
             payload[:recipient_alt].presence ||
-            payload[:recipientAlt].presence
+            payload[:recipientAlt].presence ||
+            payload[:to].presence
     normalize_phone_jid(value)&.split('@')&.first
   end
 
   def outgoing_contact_inbox
     phone = peer_phone
-    if phone.present?
-      contact_inbox = inbox.contact_inboxes.find_by(source_id: phone) ||
-                      inbox.contact_inboxes.joins(:contact).find_by(contacts: { phone_number: "+#{phone}" }) ||
-                      inbox.contact_inboxes.joins(:contact).find_by(contacts: { identifier: "#{phone}@c.us" })
-      return contact_inbox if contact_inbox.present?
-    end
+    contact_inbox = find_contact_inbox_by_phone(phone) if phone.present?
+    return contact_inbox if contact_inbox.present?
 
     chat_id = peer_chat_id
     return if chat_id.blank?
 
-    conversation = inbox.conversations.where("additional_attributes ->> 'waha_chat_id' = ?", chat_id).first
-    conversation&.contact_inbox
+    # The stored `waha_chat_id` is normalized (`@s.whatsapp.net` -> `@c.us`, no
+    # device suffix), so compare every canonical form to survive engines that
+    # report the raw JID here.
+    candidates = [chat_id, canonical_chat_id(chat_id)].uniq
+    conversation = inbox.conversations
+                        .where("additional_attributes ->> 'waha_chat_id' IN (?)", candidates)
+                        .first
+    return conversation.contact_inbox if conversation.present?
+
+    # Last resort: derive the phone from the chat JID.
+    derived_phone = contact_source_id(chat_id)
+    return find_contact_inbox_by_phone(derived_phone) if derived_phone.present? && derived_phone.match?(/\A\d{8,15}\z/)
+
+    nil
+  end
+
+  def find_contact_inbox_by_phone(phone)
+    return if phone.blank?
+
+    digits = phone.to_s
+    inbox.contact_inboxes.find_by(source_id: digits) ||
+      inbox.contact_inboxes.find_by(source_id: "#{digits}@c.us") ||
+      inbox.contact_inboxes.joins(:contact).find_by(contacts: { phone_number: "+#{digits}" }) ||
+      inbox.contact_inboxes.joins(:contact).find_by(contacts: { identifier: "#{digits}@c.us" })
+  end
+
+  def canonical_chat_id(value)
+    value.to_s.delete_prefix('+').sub(/:(\d+)@/, '@').sub('@s.whatsapp.net', '@c.us')
   end
 
   def outgoing_echo_sender
     User.where(type: 'SuperAdmin').first || User.first
   end
 
+  # WAHA reports the message timestamp in SECONDS (e.g. 1667561485, sometimes
+  # fractional). Treating it as milliseconds pushed every echo to 1970, so the
+  # message never showed up in the conversation. Tolerate millisecond payloads too.
   def echo_created_at
-    ms = payload[:timestamp].to_i
-    ms.positive? ? Time.zone.at(ms / 1000.0) : Time.current
+    value = payload[:timestamp].to_f
+    return Time.current unless value.positive?
+
+    seconds = value > 1_000_000_000_000 ? value / 1000.0 : value
+    Time.zone.at(seconds)
   end
 
   def lid_phone_jid(lid)

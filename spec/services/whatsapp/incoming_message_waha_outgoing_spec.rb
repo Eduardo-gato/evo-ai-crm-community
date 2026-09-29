@@ -32,7 +32,7 @@ RSpec.describe Whatsapp::IncomingMessageWahaService do
         id: 'true_5511999999999@c.us_ECHO',
         fromMe: true,
         body: 'Enviada pelo aparelho',
-        timestamp: 1_700_000_000_000,
+        timestamp: 1_700_000_000,
         ackName: 'DEVICE',
         _data: { Info: { Chat: '5511999999999@c.us', RecipientAlt: '5511999999999@s.whatsapp.net' } }
       }
@@ -65,6 +65,33 @@ RSpec.describe Whatsapp::IncomingMessageWahaService do
     service.perform
 
     expect(conversation.reload.status).to eq('open')
+  end
+
+  it 'stores the echo using the WAHA second-based timestamp' do
+    service.perform
+
+    expect(conversation.messages.last.created_at).to be_within(2.seconds).of(Time.zone.at(1_700_000_000))
+  end
+
+  it 'matches the conversation by deriving the phone from a @s.whatsapp.net chat JID' do
+    params[:payload][:_data] = { Info: { Chat: '5511999999999@s.whatsapp.net' } }
+
+    expect { service.perform }.to change { conversation.messages.count }.by(1)
+  end
+
+  it 'matches by waha_chat_id, normalizing @s.whatsapp.net to @c.us' do
+    conversation.update!(additional_attributes: { waha_chat_id: '5511999999999@c.us' })
+    params[:payload][:_data] = { Info: { Chat: '5511999999999@s.whatsapp.net' } }
+    allow(service).to receive(:peer_phone).and_return(nil)
+
+    expect { service.perform }.to change { conversation.messages.count }.by(1)
+  end
+
+  it 'falls back to payload.to to identify the peer' do
+    params[:payload].delete(:_data)
+    params[:payload][:to] = '5511999999999@c.us'
+
+    expect { service.perform }.to change { conversation.messages.count }.by(1)
   end
 
   it 'preserves the document name and extension on an echoed file' do
