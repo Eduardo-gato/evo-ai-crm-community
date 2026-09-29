@@ -2,11 +2,14 @@ class Whatsapp::IncomingMessageWahaService < Whatsapp::IncomingMessageBaseServic
   def perform
     case event_name
     when 'message.any', 'message'
-      return if payload[:from_me] == true || payload[:fromMe] == true
-      return if broadcast_or_status?(payload[:from])
+      if outgoing_echo?
+        process_outgoing_echo
+      else
+        return if broadcast_or_status?(payload[:from])
 
-      @processed_params = normalize_message
-      super
+        @processed_params = normalize_message
+        super
+      end
     when 'message.ack'
       process_ack
     when 'session.status'
@@ -241,6 +244,129 @@ class Whatsapp::IncomingMessageWahaService < Whatsapp::IncomingMessageBaseServic
     return nil unless jid.end_with?('@c.us', '@s.whatsapp.net')
 
     jid
+  end
+
+  # WAHA emits an echo for messages sent from the paired phone (`fromMe`). The
+  # other WhatsApp providers (Evolution / Evolution Go) surface those as outgoing
+  # messages, so we mirror that behaviour: attach the echo to the EXISTING
+  # contact/conversation (matched by phone / stored waha_chat_id) and store it as
+  # outgoing. Never creates a new contact, and skips when a message with the same
+  # source_id already exists (the echo of a message sent from the CRM panel).
+  def process_outgoing_echo
+    source_id = payload[:id].to_s
+    return if source_id.blank? || broadcast_or_status?(peer_chat_id)
+
+    existing = inbox.messages.find_by(source_id: source_id)
+    if existing
+      update_echo_delivery(existing)
+      return
+    end
+
+    contact_inbox = outgoing_contact_inbox
+    if contact_inbox.blank?
+      Rails.logger.info "WAHA outgoing echo: no existing contact (chat=#{peer_chat_id} phone=#{peer_phone}); skipping"
+      return
+    end
+
+    conversation = contact_inbox.conversations.where.not(status: :resolved).last ||
+                   contact_inbox.conversations.last
+    return if conversation.blank?
+
+    media = payload[:media].is_a?(Hash) ? payload[:media] : {}
+    type = media.present? || payload[:has_media] || payload[:hasMedia] ? media_type(media) : 'text'
+
+    message = conversation.messages.build(
+      inbox_id: inbox.id,
+      content: payload[:body].to_s,
+      source_id: source_id,
+      message_type: :outgoing,
+      sender: outgoing_echo_sender,
+      sender_type: 'User',
+      created_at: echo_created_at
+    )
+
+    attach_echo_media(message, type, media) if type != 'text'
+
+    message.save!
+    conversation.update!(status: :open) if conversation.status == 'pending'
+  rescue StandardError => e
+    Rails.logger.error "WAHA outgoing echo failed: #{e.class} - #{e.message}"
+  end
+
+  def attach_echo_media(message, type, media)
+    attachment_payload = media_payload(media, payload[:body])
+    message.content = attachment_payload[:caption] if message.content.blank?
+    attachment_file = download_attachment_file(attachment_payload)
+    return if attachment_file.blank?
+
+    message.attachments.new(
+      file_type: file_content_type(type),
+      file: {
+        io: attachment_file,
+        filename: attachment_file.original_filename,
+        content_type: attachment_file.content_type
+      }
+    )
+  end
+
+  # The echo of a message we already stored (sent from the CRM) is not duplicated;
+  # only its delivery status is refreshed here.
+  def update_echo_delivery(message)
+    ack = (payload[:ack_name] || payload[:ackName]).to_s.upcase
+    status = {
+      'SERVER' => 'sent',
+      'DEVICE' => 'delivered',
+      'READ' => 'read',
+      'PLAYED' => 'read',
+      'ERROR' => 'failed'
+    }[ack]
+    return if status.blank? || message.status == status
+
+    Messages::StatusUpdateService.new(message, status, nil).perform
+  end
+
+  def outgoing_echo?
+    payload[:from_me] == true || payload[:fromMe] == true
+  end
+
+  # Peer (contact) chat id reported by WAHA under `_data.Info.Chat`.
+  def peer_chat_id
+    payload.dig(:_data, :Info, :Chat).presence ||
+      payload[:chat_id].presence ||
+      payload[:chatId].presence
+  end
+
+  # Peer (contact) phone for a `fromMe` message: `_data.Info.RecipientAlt`.
+  def peer_phone
+    value = payload.dig(:_data, :Info, :RecipientAlt).presence ||
+            payload[:recipient_alt].presence ||
+            payload[:recipientAlt].presence
+    normalize_phone_jid(value)&.split('@')&.first
+  end
+
+  def outgoing_contact_inbox
+    phone = peer_phone
+    if phone.present?
+      contact_inbox = inbox.contact_inboxes.find_by(source_id: phone) ||
+                      inbox.contact_inboxes.joins(:contact).find_by(contacts: { phone_number: "+#{phone}" }) ||
+                      inbox.contact_inboxes.joins(:contact).find_by(contacts: { identifier: "#{phone}@c.us" })
+      return contact_inbox if contact_inbox.present?
+    end
+
+    chat_id = peer_chat_id
+    return if chat_id.blank?
+
+    conversation = inbox.conversations.where("additional_attributes ->> 'waha_chat_id' = ?", chat_id).first
+    conversation&.contact_inbox
+  end
+
+  def outgoing_echo_sender
+    User.where(type: 'SuperAdmin').first || User.first
+  end
+
+  def echo_created_at
+    ms = payload[:timestamp].to_i
+    ms.positive? ? Time.zone.at(ms / 1000.0) : Time.current
   end
 
   def lid_phone_jid(lid)
