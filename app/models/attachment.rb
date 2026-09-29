@@ -111,13 +111,13 @@ class Attachment < ApplicationRecord
 
   def file_metadata
     metadata = {
-      extension: extension,
+      extension: display_extension,
       data_url: widget_data_url,
       thumb_url: thumb_url,
       file_size: file.byte_size,
       width: file.metadata[:width],
       height: file.metadata[:height],
-      fallback_title: fallback_title
+      fallback_title: display_title
     }
 
     if attachable_type == 'Message' && attachable.inbox.instagram? && attachable.incoming?
@@ -125,6 +125,18 @@ class Attachment < ApplicationRecord
     end
 
     metadata
+  end
+
+  # Outgoing attachments created from the CRM only carry the original name on the
+  # ActiveStorage blob (the send path reads `file.filename`), so the chat card
+  # fell back to the generic "Arquivo"/"File" label. Prefer the explicit
+  # fallback_title, otherwise reuse the stored file name.
+  def display_title
+    fallback_title.presence || (file.attached? ? file.filename.to_s.presence : nil)
+  end
+
+  def display_extension
+    extension.presence || (file.attached? ? File.extname(file.filename.to_s).delete_prefix('.').presence : nil)
   end
 
   def location_metadata

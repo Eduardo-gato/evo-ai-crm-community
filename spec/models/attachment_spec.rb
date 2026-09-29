@@ -102,4 +102,33 @@ RSpec.describe Attachment, type: :model do
       end
     end
   end
+
+  describe '#push_event_data (display title/extension)' do
+    let(:doc_blob) do
+      ActiveStorage::Blob.create_and_upload!(
+        io: StringIO.new('pdf-bytes'),
+        filename: 'contrato.pdf',
+        content_type: 'application/pdf'
+      )
+    end
+    let(:doc_attachment) do
+      described_class.new(file_type: :file).tap { |record| record.file.attach(doc_blob) }
+    end
+
+    it 'falls back to the stored file name when fallback_title is blank' do
+      data = doc_attachment.push_event_data
+
+      expect(data[:fallback_title]).to eq('contrato.pdf')
+      expect(data[:extension]).to eq('pdf')
+    end
+
+    it 'prefers the explicit fallback_title and extension' do
+      doc_attachment.fallback_title = 'Nome Bonito.pdf'
+      doc_attachment.extension = 'pdf'
+
+      data = doc_attachment.push_event_data
+
+      expect(data[:fallback_title]).to eq('Nome Bonito.pdf')
+    end
+  end
 end
