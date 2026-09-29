@@ -272,6 +272,7 @@ Rails.application.routes.draw do
       resources :automation_rules, only: [:index, :create, :show, :update, :destroy], controller: 'automation_rules' do
         post :clone, on: :member
         get :runs, on: :member
+        post :upload_attachment, on: :collection
       end
 
       # Product Catalog (EVO-1109)

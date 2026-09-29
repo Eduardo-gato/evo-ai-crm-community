@@ -13,6 +13,7 @@ class Api::V1::AutomationRulesController < Api::V1::BaseController
 
   before_action :fetch_automation_rule, only: [:show, :update, :destroy, :clone, :runs]
   before_action :validate_automation_limit, only: [:create]
+  before_action :check_upload_attachment_permission!, only: [:upload_attachment]
 
   private
 
@@ -131,18 +132,104 @@ class Api::V1::AutomationRulesController < Api::V1::BaseController
     )
   end
 
-  def process_attachments
-    actions = @automation_rule.actions.filter_map { |k, _v| k if k['action_name'] == 'send_attachment' }
-    return if actions.blank?
+  # Uploads a file from the operator's computer so it can be referenced by the
+  # `send_attachment` action as an ActiveStorage blob id. Available before the
+  # rule exists (/automation/new), hence a collection route with no rule id.
+  def upload_attachment
+    file = params[:file] || params[:attachment]
+    if file.blank? || !file.respond_to?(:original_filename)
+      return error_response(
+        ApiErrorCodes::VALIDATION_ERROR,
+        'File is required',
+        status: :unprocessable_entity
+      )
+    end
 
-    actions.each do |action|
-      blob_id = action['action_params']
+    blob = ActiveStorage::Blob.create_and_upload!(
+      io: file,
+      filename: file.original_filename,
+      content_type: file.content_type
+    )
+
+    success_response(
+      data: {
+        id: blob.id,
+        signed_id: blob.signed_id,
+        filename: blob.filename.to_s,
+        content_type: blob.content_type,
+        byte_size: blob.byte_size
+      },
+      message: 'Attachment uploaded successfully',
+      status: :created
+    )
+  rescue StandardError => e
+    Rails.logger.error "Automation rule attachment upload failed: #{e.class} - #{e.message}"
+    error_response(ApiErrorCodes::VALIDATION_ERROR, 'Attachment upload failed', details: [e.message],
+                                                                                  status: :unprocessable_entity)
+  end
+
+  def process_attachments
+    attachment_blob_ids.each do |blob_id|
       blob = ActiveStorage::Blob.find_by(id: blob_id)
-      @automation_rule.files.attach(blob)
+      @automation_rule.files.attach(blob) if blob
     end
   end
 
   private
+
+  def attachment_blob_ids
+    Array(@automation_rule.actions).flat_map do |action|
+      action = plain_hash(action)
+      next [] unless action['action_name'] == 'send_attachment'
+
+      extract_blob_ids(action['action_params'])
+    end.uniq
+  end
+
+  # `action_params` may be a bare id (legacy), a hash `{attachment_ids:, inbox_id:}`
+  # or an array wrapping that hash (the current UI shape).
+  def extract_blob_ids(params)
+    case params
+    when Array
+      params.flat_map { |entry| blob_ids_from_entry(entry) }.compact
+    else
+      hash = plain_hash(params)
+      hash.present? ? Array(hash['attachment_ids'] || hash[:attachment_ids]).compact : [params].compact
+    end
+  end
+
+  def blob_ids_from_entry(entry)
+    hash = plain_hash(entry)
+    hash.present? ? Array(hash['attachment_ids'] || hash[:attachment_ids]) : [entry]
+  end
+
+  # `params[:actions]` may arrive as ActionController::Parameters (create) or as
+  # a plain hash (read back from jsonb); normalize either to string-keyed hashes.
+  def plain_hash(value)
+    return {} unless value.respond_to?(:[])
+
+    if value.respond_to?(:to_unsafe_h)
+      value.to_unsafe_h
+    elsif value.is_a?(Hash)
+      value
+    else
+      {}
+    end
+  end
+
+  # Upload is reachable from both the create (/new) and edit screens, so accept
+  # either permission.
+  def check_upload_attachment_permission!
+    return if Current.service_authenticated == true
+
+    user_id = Current.user&.id
+    return render_permission_denied if user_id.blank?
+
+    allowed = %w[automation_rules.create automation_rules.update].any? do |permission|
+      has_user_permission?(user_id, permission)
+    end
+    render_permission_denied unless allowed
+  end
 
   def automation_rule_update
     @automation_rule.update!(automation_rules_permit)

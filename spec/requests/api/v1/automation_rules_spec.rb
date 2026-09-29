@@ -198,4 +198,63 @@ RSpec.describe 'Api::V1::AutomationRules', type: :request do
       AutomationRuleListener.instance.conversation_updated(event)
     end
   end
+
+  describe 'POST /api/v1/automation_rules/upload_attachment' do
+    def uploaded_file
+      path = File.join(Dir.mktmpdir, 'nota.txt')
+      File.write(path, 'hello')
+      Rack::Test::UploadedFile.new(path, 'text/plain')
+    end
+
+    it 'creates a blob and returns its id and filename' do
+      post '/api/v1/automation_rules/upload_attachment', params: { file: uploaded_file }, headers: headers
+
+      expect(response).to have_http_status(:created)
+      data = json_response['data']
+      expect(data['filename']).to eq('nota.txt')
+      expect(ActiveStorage::Blob.find_by(id: data['id'])).to be_present
+    end
+
+    it 'rejects a request without a file' do
+      post '/api/v1/automation_rules/upload_attachment', params: {}, headers: headers
+
+      expect(response).to have_http_status(:unprocessable_entity)
+    end
+  end
+
+  # `send_attachment` references ActiveStorage blobs; the rule only sends them at
+  # runtime when they are attached to `rule.files` (the handler guards on
+  # `@rule.files.attached?`), so create/update must attach the referenced blobs.
+  describe 'send_attachment action_params' do
+    def blob_for(filename)
+      ActiveStorage::Blob.create_and_upload!(io: StringIO.new('bytes'), filename: filename,
+                                              content_type: 'application/pdf')
+    end
+
+    it 'attaches the referenced blobs to the rule files (array-of-hash shape)' do
+      blob = blob_for('contrato.pdf')
+      payload = rule_payload(conditions: []).merge(
+        actions: [{ action_name: 'send_attachment', action_params: [{ attachment_ids: [blob.id], inbox_id: nil }] }]
+      )
+
+      post '/api/v1/automation_rules', params: payload, headers: headers, as: :json
+
+      expect(response).to have_http_status(:created)
+      rule = persisted_rule
+      expect(rule.files.attached?).to be(true)
+      expect(rule.files.map(&:blob_id)).to include(blob.id)
+    end
+
+    it 'attaches blob ids from the legacy bare-id shape' do
+      blob = blob_for('antigo.pdf')
+      payload = rule_payload(conditions: []).merge(
+        actions: [{ action_name: 'send_attachment', action_params: blob.id }]
+      )
+
+      post '/api/v1/automation_rules', params: payload, headers: headers, as: :json
+
+      expect(response).to have_http_status(:created)
+      expect(persisted_rule.files.map(&:blob_id)).to include(blob.id)
+    end
+  end
 end

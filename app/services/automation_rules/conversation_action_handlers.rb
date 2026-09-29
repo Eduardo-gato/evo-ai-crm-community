@@ -200,16 +200,7 @@ module AutomationRules
       return unless @conversation
       return if conversation_a_tweet?
 
-      if attachment_params.is_a?(Array)
-        blob_ids = attachment_params
-        inbox_id = nil
-      elsif attachment_params.is_a?(Hash)
-        blob_ids = attachment_params[:attachment_ids] || attachment_params['attachment_ids']
-        inbox_id = attachment_params[:inbox_id] || attachment_params['inbox_id']
-      else
-        blob_ids = [attachment_params].flatten
-        inbox_id = nil
-      end
+      blob_ids, inbox_id = normalize_attachment_params(attachment_params)
 
       return unless @rule.files.attached?
 
@@ -229,6 +220,22 @@ module AutomationRules
     rescue StandardError => e
       Rails.logger.error "Automation Rule #{@rule.id}: Error sending attachment: #{e.message}"
       raise e
+    end
+
+    # `action_params` reaches here in one of three shapes: a bare blob id
+    # (legacy), a hash `{attachment_ids:, inbox_id:}`, or an array wrapping that
+    # hash (the current UI/simple-action shape).
+    def normalize_attachment_params(attachment_params)
+      if attachment_params.is_a?(Hash)
+        [Array(attachment_params[:attachment_ids] || attachment_params['attachment_ids']),
+         attachment_params[:inbox_id] || attachment_params['inbox_id']]
+      elsif attachment_params.is_a?(Array) && attachment_params.first.is_a?(Hash)
+        first = attachment_params.first
+        [Array(first[:attachment_ids] || first['attachment_ids']),
+         first[:inbox_id] || first['inbox_id']]
+      else
+        [Array(attachment_params).flatten.compact, nil]
+      end
     end
 
     # --- Email -------------------------------------------------------------
