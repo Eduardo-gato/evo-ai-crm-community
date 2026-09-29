@@ -67,6 +67,25 @@ RSpec.describe Whatsapp::IncomingMessageWahaService do
     expect(conversation.reload.status).to eq('open')
   end
 
+  it 'preserves the document name and extension on an echoed file' do
+    params[:payload][:body] = ''
+    params[:payload][:hasMedia] = true
+    params[:payload][:media] = {
+      url: 'http://waha.test/api/files/doc-1',
+      mimetype: 'application/pdf',
+      filename: 'contrato.pdf'
+    }
+    allow(service).to receive(:download_attachment_file).and_return(StringIO.new('pdf-bytes'))
+
+    service.perform
+
+    attachment = conversation.messages.last.attachments.last
+    expect(attachment).to be_present
+    expect(attachment.file_type).to eq('file')
+    expect(attachment.fallback_title).to eq('contrato.pdf')
+    expect(attachment.extension).to eq('pdf')
+  end
+
   it 'deduplicates the echo of a message already stored (same source_id)' do
     existing = conversation.messages.create!(
       inbox_id: inbox.id,

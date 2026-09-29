@@ -60,7 +60,7 @@ class Whatsapp::IncomingMessageWahaService < Whatsapp::IncomingMessageBaseServic
   end
 
   def media_type(media)
-    mimetype = media[:mimetype].to_s
+    mimetype = media_mimetype(media)
     return 'image' if mimetype.start_with?('image/')
     return 'audio' if mimetype.start_with?('audio/')
     return 'video' if mimetype.start_with?('video/')
@@ -68,13 +68,114 @@ class Whatsapp::IncomingMessageWahaService < Whatsapp::IncomingMessageBaseServic
     'document'
   end
 
+  # WAHA exposes the mimetype on `media`, but some engines/paths omit it (or
+  # deliver `media.url = null`). Fall back to the raw engine message so we still
+  # render the correct preview (image/video/audio) instead of a generic file.
+  def media_mimetype(media)
+    media[:mimetype].presence || media[:mimeType].presence || data_message_mimetype.to_s
+  end
+
   def media_payload(media, caption)
     {
       id: media[:url].presence || payload[:id].to_s,
       caption: caption.to_s,
-      filename: media[:filename],
-      mimetype: media[:mimetype]
+      filename: media_filename(media),
+      mimetype: media_mimetype(media).presence
     }
+  end
+
+  # `media.filename` carries the original document name; fall back to the raw
+  # engine message for engines that only expose `fileName` there.
+  def media_filename(media)
+    media[:filename].presence || media[:fileName].presence || media[:file_name].presence || data_message_filename
+  end
+
+  MEDIA_MESSAGE_KEYS = %i[imageMessage videoMessage audioMessage documentMessage stickerMessage].freeze
+  MIMETYPE_EXTENSIONS = {
+    'image/jpeg' => 'jpg',
+    'image/png' => 'png',
+    'image/webp' => 'webp',
+    'image/gif' => 'gif',
+    'video/mp4' => 'mp4',
+    'video/3gpp' => '3gp',
+    'audio/ogg' => 'ogg',
+    'audio/mpeg' => 'mp3',
+    'audio/mp4' => 'm4a',
+    'application/pdf' => 'pdf'
+  }.freeze
+
+  def data_message_mimetype
+    message = data_media_message
+    MEDIA_MESSAGE_KEYS.each do |key|
+      value = message.dig(key, :mimetype)
+      return value if value.present?
+    end
+    nil
+  end
+
+  def data_message_filename
+    message = data_media_message
+    message.dig(:documentMessage, :fileName).presence || message.dig(:documentMessage, :filename).presence
+  end
+
+  # The raw engine payload keeps the protocol message under `_data.message`,
+  # sometimes wrapped (documentWithCaption / viewOnce / ephemeral).
+  def data_media_message
+    raw = payload[:_data]
+    return {} unless raw.is_a?(Hash)
+
+    message = raw[:message] || raw[:Message]
+    return {} unless message.is_a?(Hash)
+
+    inner = message.dig(:documentWithCaptionMessage, :message) ||
+            message.dig(:viewOnceMessage, :message) ||
+            message.dig(:viewOnceMessageV2, :message) ||
+            message.dig(:ephemeralMessage, :message)
+    inner.is_a?(Hash) ? message.merge(inner) : message
+  end
+
+  def media_extension(name, media)
+    from_name = name.present? ? File.extname(name).delete_prefix('.') : nil
+    return from_name if from_name.present?
+
+    mimetype = media_mimetype(media).to_s.split(';').first
+    return nil if mimetype.blank?
+
+    MIMETYPE_EXTENSIONS.fetch(mimetype) { mimetype.split('/').last }
+  end
+
+  # The shared base service ignores WAHA's filename/mimetype, so attachments
+  # showed up as a generic "Arquivo" without extension or preview. Override it to
+  # persist `fallback_title`/`extension` and use the real content type.
+  def attach_files
+    return if %w[text button interactive location contacts].include?(message_type)
+
+    attachment_payload = @processed_params[:messages].first[message_type.to_sym]
+    @message.content ||= attachment_payload[:caption]
+
+    attachment_file = download_attachment_file(attachment_payload)
+    return if attachment_file.blank?
+
+    build_media_attachment(@message, file_content_type(message_type), attachment_payload, attachment_file)
+  end
+
+  def build_media_attachment(message, file_type, attachment_payload, attachment_file)
+    media = payload[:media].is_a?(Hash) ? payload[:media] : {}
+    name = attachment_payload[:filename].presence
+    content_type = attachment_payload[:mimetype].presence || attachment_file.content_type
+
+    attachment = message.attachments.new(
+      file_type: file_type,
+      fallback_title: name,
+      file: {
+        io: attachment_file,
+        filename: name.presence || attachment_file.original_filename,
+        content_type: content_type
+      }
+    )
+    extension = media_extension(name, media)
+    attachment.extension = extension if extension.present?
+    attachment
   end
 
   def set_contact
@@ -299,14 +400,7 @@ class Whatsapp::IncomingMessageWahaService < Whatsapp::IncomingMessageBaseServic
     attachment_file = download_attachment_file(attachment_payload)
     return if attachment_file.blank?
 
-    message.attachments.new(
-      file_type: file_content_type(type),
-      file: {
-        io: attachment_file,
-        filename: attachment_file.original_filename,
-        content_type: attachment_file.content_type
-      }
-    )
+    build_media_attachment(message, file_content_type(type), attachment_payload, attachment_file)
   end
 
   # The echo of a message we already stored (sent from the CRM) is not duplicated;

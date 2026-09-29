@@ -264,4 +264,40 @@ RSpec.describe Whatsapp::IncomingMessageWahaService do
       expect(service.send(:resolved_from)).to eq('168422931472444@lid')
     end
   end
+
+  describe 'media metadata resolution' do
+    let(:params) { { event: 'message.any', payload: { id: 'x', from: '5511@c.us', fromMe: false, media: {} } } }
+
+    it 'uses media.mimetype when present' do
+      media = { mimetype: 'image/png', filename: nil }
+
+      expect(service.send(:media_type, media)).to eq('image')
+      expect(service.send(:media_extension, nil, media)).to eq('png')
+    end
+
+    it 'falls back to the raw engine message for mimetype and filename' do
+      params[:payload][:media] = { url: 'http://waha.test/api/files/doc-1', filename: nil, mimetype: nil }
+      params[:payload][:_data] = {
+        message: { documentMessage: { mimetype: 'application/pdf', fileName: 'contrato.pdf' } }
+      }
+
+      expect(service.send(:media_type, params[:payload][:media])).to eq('document')
+      expect(service.send(:media_mimetype, params[:payload][:media])).to eq('application/pdf')
+      expect(service.send(:media_filename, params[:payload][:media])).to eq('contrato.pdf')
+      expect(service.send(:media_extension, 'contrato.pdf', params[:payload][:media])).to eq('pdf')
+    end
+
+    it 'unwraps documentWithCaptionMessage wrappers' do
+      params[:payload][:_data] = {
+        message: {
+          documentWithCaptionMessage: {
+            message: { documentMessage: { mimetype: 'application/pdf', fileName: 'nota.pdf' } }
+          }
+        }
+      }
+
+      expect(service.send(:media_mimetype, {})).to eq('application/pdf')
+      expect(service.send(:media_filename, {})).to eq('nota.pdf')
+    end
+  end
 end
